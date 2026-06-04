@@ -6,14 +6,21 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from zoneinfo import ZoneInfo
-
-TOKEN = "MTUxMTkwNjE0MzE3NjIyODk4NA.GTYCii.6ZMpnT7REvtB2ZMf0e1jbarrunR5Pij9yJaChk"
+import os
+import dotenv
+from dotenv import load_dotenv
+load_dotenv()
 
 # ------------ IDs / CONSTANTS ------------
 MAIN_GUILD_ID = 1487301382909460502   # main server ID
 APPEAL_GUILD_ID = 1511906566289231872 # appeal server ID
 APPEAL_CHANNEL_ID = 1511936726329983038  # appeal review channel ID (in appeal server)
 STAFF_ROLE_ID = 1511906797483589645     # staff role in appeal server (ping + permissions)
+
+# ROLES IN MAIN SERVER
+MOD_ROLE_ID = 1511901484374032454       # Mod role (mods and up can use all staff commands)
+TRIAL_MOD_ROLE_ID = 1498151111616630794 # Trial Mod role (can use mute/timeout)
+MUTED_ROLE_ID = 0                       # unused now (no role‑based mute)
 
 MAIN_SERVER_INVITE = "https://discord.gg/zQYcQFHwcm"
 SERVER_NAME = "Comptive Tagging Gorillas"
@@ -125,63 +132,83 @@ async def setup_countdown(message: discord.Message, end_time: datetime):
 
         await asyncio.sleep(60)
 
+# ---------- Permission helpers (mods+, trial for timeout) ----------
 
-# ============================================================
-#                       /submit-report
-# ============================================================
+def is_mod_or_admin(member: discord.Member) -> bool:
+    """
+    Mods and up:
+    - Admins
+    - Members with MOD_ROLE_ID
+    """
+    if member.guild_permissions.administrator:
+        return True
 
-class SRActionSelect(discord.ui.Select):
-    def __init__(self):
+    if MOD_ROLE_ID:
+        role = member.guild.get_role(MOD_ROLE_ID)
+        if role and role in member.roles:
+            return True
+
+    return False
+
+def can_timeout(member: discord.Member) -> bool:
+    """
+    Who can use mute/timeout:
+    - Admins
+    - Mods
+    - Trial Mods
+    """
+    if is_mod_or_admin(member):
+        return True
+
+    if TRIAL_MOD_ROLE_ID:
+        trial_role = member.guild.get_role(TRIAL_MOD_ROLE_ID)
+        if trial_role and trial_role in member.roles:
+            return True
+
+    return False
+
+# ---------------- Kick Flow selects (unused, but kept) ----------------
+
+class MemberSelect(discord.ui.UserSelect):
+    def __init__(self, placeholder: str = "Select a member to kick..."):
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            custom_id="kick_member_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "KickReportView" = self.view  # type: ignore
+        view.target_member = self.values[0]
+        await view.check_and_finish(interaction)
+
+
+class ReasonSelect(discord.ui.Select):
+    def __init__(self, placeholder: str = "Select the reason for the kick..."):
         options = [
-            discord.SelectOption(label="Ban", value="ban"),
-            discord.SelectOption(label="Warning", value="warning"),
-            discord.SelectOption(label="Mute/Timeout", value="mute"),
+            discord.SelectOption(label="Toxicity", value="toxicity"),
+            discord.SelectOption(label="Harassment", value="harassment"),
+            discord.SelectOption(label="Spam", value="spam"),
+            discord.SelectOption(label="Other", value="other"),
         ]
         super().__init__(
-            placeholder="Choose an action...",
+            placeholder=placeholder,
             min_values=1,
             max_values=1,
             options=options,
-            custom_id="sr_action_select"
+            custom_id="kick_reason_select"
         )
 
     async def callback(self, interaction: discord.Interaction):
-        action = self.values[0]
-        view = SRMemberSelectView(action)
-        await interaction.response.edit_message(
-            content=f"Action selected: **{action.capitalize()}**. Now choose a member:",
-            view=view
-        )
+        view: "KickReportView" = self.view  # type: ignore
+        view.reason = self.values[0]
+        await view.check_and_finish(interaction)
 
-class SRActionSelectView(discord.ui.View):
-    def __init__(self, timeout: Optional[float] = 120):
-        super().__init__(timeout=timeout)
-        self.add_item(SRActionSelect())
 
-class SRMemberSelect(discord.ui.UserSelect):
-    def __init__(self, action: str):
-        super().__init__(
-            placeholder="Select a member...",
-            min_values=1,
-            max_values=1,
-            custom_id="sr_member_select"
-        )
-        self.action = action
-
-    async def callback(self, interaction: discord.Interaction):
-        member = self.values[0]
-        action = self.action
-        # Open appropriate modal
-        if action in ("ban", "mute"):
-            modal = SRDurationReasonModal(action=action, target=member)
-        else:
-            modal = SRReasonOnlyModal(action=action, target=member)
-        await interaction.response.send_modal(modal)
-
-class SRMemberSelectView(discord.ui.View):
-    def __init__(self, action: str, timeout: Optional[float] = 120):
-        super().__init__(timeout=timeout)
-        self.add_item(SRMemberSelect(action))
+# ============================================================
+# /submit-report modals
+# ============================================================
 
 class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
     def __init__(self, action: str, target: discord.Member | discord.User):
@@ -207,10 +234,33 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            await interaction.response.send_message(
+                "This command can only be used in the main server.",
+                ephemeral=True
+            )
             return
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "You must be in the server to use this.",
+                ephemeral=True
+            )
+            return
+
+        # Ban: mods+ only
+        if self.action == "ban" and not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message(
+                "You must be a moderator or admin to ban members.",
+                ephemeral=True
+            )
+            return
+
+        # Mute: mods+ OR trial mods
+        if self.action == "mute" and not can_timeout(interaction.user):
+            await interaction.response.send_message(
+                "You must be staff (Trial Mod or higher) to mute members.",
+                ephemeral=True
+            )
             return
 
         duration_text = self.duration_input.value
@@ -241,7 +291,7 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             try:
                 dm_msg = await self.target.send(embed=embed)
             except Exception:
-                pass
+                dm_msg = None
 
             # Perform the ban
             guild = interaction.guild
@@ -277,23 +327,27 @@ class SRDurationReasonModal(discord.ui.Modal, title="Submit Report"):
             except Exception:
                 pass
 
-            # Apply timeout (if member)
+            # Apply Discord timeout ONLY (no role)
             if isinstance(self.target, discord.Member):
                 try:
-                    await self.target.edit(timeout=end_time)
+                    # Older discord.py: use communication_disabled_until
+                    await self.target.edit(communication_disabled_until=end_time)
                 except Exception:
+                    # Silently ignore if it fails (no error sent to staff)
                     pass
 
             await interaction.response.send_message(
-                f"{self.target.mention} has been **muted** for `{duration_text}`.\nReason: {reason}",
+                f"{self.target.mention} has been **muted (timed out)** for `{duration_text}`.\nReason: {reason}",
                 ephemeral=True
             )
+
 
 class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
     def __init__(self, action: str, target: discord.Member | discord.User):
         super().__init__(timeout=300)
         self.action = action
         self.target = target
+
         self.reason_input = discord.ui.TextInput(
             label="Reason",
             style=discord.TextStyle.paragraph,
@@ -305,10 +359,17 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+            await interaction.response.send_message(
+                "This command can only be used in the main server.",
+                ephemeral=True
+            )
             return
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admins only.", ephemeral=True)
+
+        if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+            await interaction.response.send_message(
+                "You must be a moderator or admin to use this.",
+                ephemeral=True
+            )
             return
 
         reason = self.reason_input.value
@@ -333,19 +394,90 @@ class SRReasonOnlyModal(discord.ui.Modal, title="Submit Report"):
             )
 
 
-@bot.tree.command(name="submit-report", description="Submit a moderation report (admins only)")
+# ============================================================
+# /submit-report UI (selects & views)
+# ============================================================
+
+class SRMemberSelect(discord.ui.UserSelect):
+    def __init__(self, action: str):
+        super().__init__(
+            placeholder="Select a member...",
+            min_values=1,
+            max_values=1,
+            custom_id="sr_member_select"
+        )
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        action = self.action
+        if action in ("ban", "mute"):
+            modal = SRDurationReasonModal(action=action, target=member)
+        else:
+            modal = SRReasonOnlyModal(action=action, target=member)
+        await interaction.response.send_modal(modal)
+
+
+class SRMemberSelectView(discord.ui.View):
+    def __init__(self, action: str, timeout: Optional[float] = 120):
+        super().__init__(timeout=timeout)
+        self.add_item(SRMemberSelect(action))
+
+
+class SRActionSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Ban", value="ban"),
+            discord.SelectOption(label="Warning", value="warning"),
+            discord.SelectOption(label="Mute/Timeout", value="mute"),
+        ]
+        super().__init__(
+            placeholder="Choose an action...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="sr_action_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        action = self.values[0]
+        view = SRMemberSelectView(action)
+        await interaction.response.edit_message(
+            content=f"Action selected: **{action.capitalize()}**. Now choose a member:",
+            view=view
+        )
+
+
+class SRActionSelectView(discord.ui.View):
+    def __init__(self, timeout: Optional[float] = 120):
+        super().__init__(timeout=timeout)
+        self.add_item(SRActionSelect())
+
+
+# ============================================================
+#                       /submit-report
+# ============================================================
+
+@bot.tree.command(name="submit-report", description="Submit a staff report (ban/warn/mute).")
 @app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
 async def submit_report(interaction: discord.Interaction):
     if interaction.guild is None or interaction.guild.id != MAIN_GUILD_ID:
-        await interaction.response.send_message("This command can only be used in the main server.", ephemeral=True)
+        await interaction.response.send_message(
+            "This command can only be used in the main server.",
+            ephemeral=True
+        )
         return
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("You must be an admin to use this command.", ephemeral=True)
+
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
+        await interaction.response.send_message(
+            "You must be a moderator or admin to use this command.",
+            ephemeral=True
+        )
         return
 
     view = SRActionSelectView()
     await interaction.response.send_message(
-        "Choose an action for this report:",
+        "Select the type of report you want to submit:",
         view=view,
         ephemeral=True
     )
@@ -428,7 +560,10 @@ class AppealModal(discord.ui.Modal, title="Ban Appeal Form"):
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != APPEAL_GUILD_ID:
-            await interaction.response.send_message("This command can only be used in the appeal server.", ephemeral=True)
+            await interaction.response.send_message(
+                "This command can only be used in the appeal server.",
+                ephemeral=True
+            )
             return
 
         user = interaction.user
@@ -526,7 +661,7 @@ class StaffDecisionView(discord.ui.View):
             try:
                 msg = (
                     "You have Been Unbanned join our server here:\n"
-                    "[Main Server](https://discord.gg/zQYcQFHwcm)"
+                    f"[Main Server]({MAIN_SERVER_INVITE})"
                 )
                 await user.send(msg)
             except Exception:
@@ -536,13 +671,11 @@ class StaffDecisionView(discord.ui.View):
         main_guild = client.get_guild(MAIN_GUILD_ID)
         if main_guild:
             try:
-                # This works even if the user is not cached
                 await main_guild.unban(discord.Object(id=user_id), reason="Appeal accepted")
             except discord.NotFound:
                 # Not currently banned – ignore
                 pass
             except Exception:
-                # You can log this if you want
                 pass
 
         # Kick from appeal server
@@ -673,10 +806,10 @@ async def kick(
         )
         return
 
-    # Admins only
-    if not interaction.user.guild_permissions.administrator:
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
-            "You must be an admin to use this command.",
+            "You must be a moderator or admin to use this command.",
             ephemeral=True
         )
         return
@@ -721,7 +854,7 @@ async def kick(
         ephemeral=True
     )
 
-# /unban command (main server only, admins only)
+# /unban command (main server only, mods+ only)
 
 @bot.tree.command(name="unban", description="Unban a user from the main server")
 @app_commands.describe(
@@ -742,10 +875,10 @@ async def unban(
         )
         return
 
-    # Admins only
-    if not interaction.user.guild_permissions.administrator:
+    # Mods+ only
+    if not isinstance(interaction.user, discord.Member) or not is_mod_or_admin(interaction.user):
         await interaction.response.send_message(
-            "You must be an admin to use this command.",
+            "You must be a moderator or admin to use this command.",
             ephemeral=True
         )
         return
@@ -790,7 +923,7 @@ async def unban(
         try:
             embed = discord.Embed(
                 title="You Have Been Unbanned",
-                description="[our main server](https://discord.gg/zQYcQFHwcm)",
+                description=f"[our main server]({MAIN_SERVER_INVITE})",
                 color=discord.Color.green()
             )
             await user.send(embed=embed)
@@ -803,22 +936,71 @@ async def unban(
     )
 
 
+@bot.tree.command(name="parge", description="Delete a certain amount of recent messages.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(amount="How many messages to delete (max 100)")
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def parge(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100]):
+    channel = interaction.channel
+
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "This command can only be used in a text channel.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    deleted = await channel.purge(limit=amount)
+    await interaction.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
+
+
+@bot.tree.command(name="lock-down", description="Lock the current channel so only staff can talk.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guilds(discord.Object(id=MAIN_GUILD_ID))
+async def lock_down(interaction: discord.Interaction):
+    channel = interaction.channel
+    guild = interaction.guild
+
+    if guild is None or channel is None:
+        await interaction.response.send_message(
+            "This command can only be used in a server text channel.",
+            ephemeral=True
+        )
+        return
+
+    everyone_role = guild.default_role
+    overwrite = channel.overwrites_for(everyone_role)
+
+    if overwrite.send_messages is False:
+        await interaction.response.send_message(
+            "This channel is already locked down.",
+            ephemeral=True
+        )
+        return
+
+    overwrite.send_messages = False
+    await channel.set_permissions(everyone_role, overwrite=overwrite)
+
+    await interaction.response.send_message("This channel has been locked down.", ephemeral=True)
+
+
 # ---------- on_ready / sync ----------
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
-    # Sync main guild commands (for /submit-report)
+    # Sync commands for main guild (all commands with @app_commands.guilds(MAIN_GUILD_ID))
     main_guild = discord.Object(id=MAIN_GUILD_ID)
-    bot.tree.copy_global_to(guild=main_guild)
     await bot.tree.sync(guild=main_guild)
 
-    # Sync appeal guild commands (for /appeal)
+    # Sync commands for appeal guild (all commands with @app_commands.guilds(APPEAL_GUILD_ID))
     appeal_guild = discord.Object(id=APPEAL_GUILD_ID)
-    bot.tree.copy_global_to(guild=appeal_guild)
     await bot.tree.sync(guild=appeal_guild)
 
     print("Slash commands synced for main and appeal guilds.")
 
-bot.run(TOKEN)
+
+bot.run(os.getenv("TOKEN"))
