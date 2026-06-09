@@ -12,19 +12,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ------------ IDs / CONSTANTS ------------
-MAIN_GUILD_ID = 1487301382909460502   # main server ID
-APPEAL_GUILD_ID = 1511906566289231872 # appeal server ID
-APPEAL_CHANNEL_ID = 1511936726329983038  # appeal review channel ID (in appeal server)
-STAFF_ROLE_ID = 1511906797483589645     # staff role in appeal server (ping + permissions)
+MAIN_GUILD_ID = 1469203259842494497   # main server ID
+APPEAL_GUILD_ID = 1514003288742297761 # appeal server ID
+APPEAL_CHANNEL_ID = 1514004458848391218  # appeal review channel ID (in appeal server)
+STAFF_ROLE_ID = 1514003435387617351     # staff role in appeal server (ping + permissions)
 
 # ROLES IN MAIN SERVER
-MOD_ROLE_ID = 1511901484374032454       # Mod role (mods and up can use all staff commands)
-TRIAL_MOD_ROLE_ID = 1498151111616630794 # Trial Mod role (can use mute/timeout)
+MOD_ROLE_ID = 1470383666722246677       # Mod role (mods and up can use all staff commands)
+TRIAL_MOD_ROLE_ID = 1470383693641027616 # Trial Mod role (can use mute/timeout)
 MUTED_ROLE_ID = 0                       # unused now (no role‑based mute)
 
-MAIN_SERVER_INVITE = "https://discord.gg/zQYcQFHwcm"
-SERVER_NAME = "Comptive Tagging Gorillas"
-APPEAL_LINK = "https://discord.gg/wRfgzEB95E"  # for ban DM
+MAIN_SERVER_INVITE = "https://discord.gg/g8EZ4eM6MQ"
+SERVER_NAME = "Pro Division Association"
+APPEAL_LINK = "https://discord.gg/TqJusq7rVa"  # for ban DM
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -831,7 +831,7 @@ async def kick(
     # DM with red embed
     try:
         embed = discord.Embed(
-            title="You Have Been Kicked From Comptive Tagging Gorillas",
+            title="You Have Been Kicked From Pro Division Association",
             color=discord.Color.red()
         )
         embed.add_field(name="Reason:", value=reason, inline=False)
